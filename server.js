@@ -1,19 +1,25 @@
-
 const express = require('express');
 const cors = require('cors');
 const ytdl = require('ytdl-core');
 const yts = require('yt-search');
-const path = require('path');
-const fs = require('fs');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
 
-// Rate limiting
+// 🔁 Free Proxy List
+const proxies = [
+  'http://185.199.229.156:7492',
+  'http://159.89.132.108:8989',
+  'http://45.167.125.61:999',
+  'http://89.208.219.121:8080',
+  'http://190.61.88.147:8080'
+];
+
+// 🛡️ Basic Rate Limiting
 const rateLimitMap = new Map();
 const RATE_LIMIT = process.env.RATE_LIMIT || 100;
 const RATE_LIMIT_WINDOW = process.env.RATE_LIMIT_WINDOW || 60 * 60 * 1000;
@@ -28,7 +34,6 @@ const rateLimit = (req, res, next) => {
   }
 
   const userData = rateLimitMap.get(ip);
-
   if (now > userData.resetTime) {
     userData.count = 1;
     userData.resetTime = now + RATE_LIMIT_WINDOW;
@@ -36,10 +41,7 @@ const rateLimit = (req, res, next) => {
   }
 
   if (userData.count >= RATE_LIMIT) {
-    return res.status(429).json({
-      error: 'Rate limit exceeded',
-      message: 'Too many requests. Please try again later.'
-    });
+    return res.status(429).json({ error: 'Rate limit exceeded' });
   }
 
   userData.count++;
@@ -48,28 +50,23 @@ const rateLimit = (req, res, next) => {
 
 app.use(rateLimit);
 
-const isValidYouTubeUrl = (url) => {
-  const ytRegex = /^(https?\:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
-  return ytRegex.test(url);
-};
-
+// 🩺 Health Check
 app.get('/', (req, res) => {
-  res.json({
-    message: 'YouTube Music API is running!',
-    version: '1.0.0'
-  });
+  res.json({ message: '🟢 YouTube Music API is running with proxy support' });
 });
 
+// 🔍 Search Endpoint
 app.get('/api/search', async (req, res) => {
+  const { q, limit = 20 } = req.query;
+  if (!q) return res.status(400).json({ error: 'Missing query' });
+
   try {
-    const { q, limit = 20 } = req.query;
-    if (!q) return res.status(400).json({ error: 'Missing query' });
-    const results = await yts(q);
-    const videos = results.videos.slice(0, limit).map(video => ({
+    const result = await yts(q);
+    const videos = result.videos.slice(0, limit).map(video => ({
       id: video.videoId,
       title: video.title,
       author: video.author.name,
-      duration: video.duration.timestamp,
+      duration: video.timestamp,
       thumbnail: video.thumbnail,
       url: video.url,
       views: video.views
@@ -80,62 +77,68 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
+// ℹ️ Video Info Endpoint
 app.get('/api/info', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing URL' });
+
   try {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: 'Missing URL' });
+    const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+    const agent = new HttpsProxyAgent(proxy);
 
     const info = await ytdl.getInfo(url, {
       requestOptions: {
+        agent,
         headers: {
-          'User-Agent': 'Mozilla/5.0',
-          'x-youtube-client-name': '1',
-          'x-youtube-client-version': '2.20210721.00.00'
+          'User-Agent': 'Mozilla/5.0'
         }
       }
     });
 
-    const videoDetails = info.videoDetails;
-    const formats = info.formats
-      .filter(format => format.hasAudio)
-      .map(format => ({
-        itag: format.itag,
-        container: format.container,
-        quality: format.qualityLabel,
-        audioQuality: format.audioQuality,
-        bitrate: format.bitrate
-      }));
-
+    const video = info.videoDetails;
     res.json({
       success: true,
       info: {
-        id: videoDetails.videoId,
-        title: videoDetails.title,
-        author: videoDetails.author.name,
-        duration: videoDetails.lengthSeconds,
-        description: videoDetails.description,
-        thumbnail: videoDetails.thumbnails.pop().url,
-        formats
+        id: video.videoId,
+        title: video.title,
+        author: video.author.name,
+        duration: video.lengthSeconds,
+        description: video.description,
+        thumbnail: video.thumbnails?.pop()?.url,
+        formats: info.formats.filter(f => f.hasAudio)
       }
     });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch info', message: err.message });
+    res.status(500).json({ error: 'Info failed', message: err.message });
   }
 });
 
+// 🎧 Stream Endpoint
 app.get('/api/stream', async (req, res) => {
+  const { url, quality = 'highestaudio' } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing URL' });
+
   try {
-    const { url, quality = 'highestaudio' } = req.query;
-    const info = await ytdl.getInfo(url);
+    const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+    const agent = new HttpsProxyAgent(proxy);
+
+    const info = await ytdl.getInfo(url, {
+      requestOptions: {
+        agent,
+        headers: {
+          'User-Agent': 'Mozilla/5.0'
+        }
+      }
+    });
+
     const format = ytdl.chooseFormat(info.formats, { quality, filter: 'audioonly' });
 
     const stream = ytdl.downloadFromInfo(info, {
       format,
       requestOptions: {
+        agent,
         headers: {
-          'User-Agent': 'Mozilla/5.0',
-          'x-youtube-client-name': '1',
-          'x-youtube-client-version': '2.20210721.00.00'
+          'User-Agent': 'Mozilla/5.0'
         }
       }
     });
@@ -148,19 +151,32 @@ app.get('/api/stream', async (req, res) => {
   }
 });
 
+// ⬇️ Download Endpoint
 app.get('/api/download', async (req, res) => {
+  const { url, format = 'mp3' } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing URL' });
+
   try {
-    const { url, format = 'mp3' } = req.query;
-    const info = await ytdl.getInfo(url);
+    const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+    const agent = new HttpsProxyAgent(proxy);
+
+    const info = await ytdl.getInfo(url, {
+      requestOptions: {
+        agent,
+        headers: {
+          'User-Agent': 'Mozilla/5.0'
+        }
+      }
+    });
+
     const selected = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
 
     const stream = ytdl.downloadFromInfo(info, {
       format: selected,
       requestOptions: {
+        agent,
         headers: {
-          'User-Agent': 'Mozilla/5.0',
-          'x-youtube-client-name': '1',
-          'x-youtube-client-version': '2.20210721.00.00'
+          'User-Agent': 'Mozilla/5.0'
         }
       }
     });
@@ -174,5 +190,5 @@ app.get('/api/download', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ API running at http://localhost:${PORT}`);
+  console.log(`🎧 Proxy YouTube API running on http://localhost:${PORT}`);
 });
