@@ -1,2 +1,0 @@
-# Lucid-MD
-IDK
